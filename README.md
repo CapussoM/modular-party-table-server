@@ -10,6 +10,10 @@ This single FastAPI application provides:
 
 It does not process or store gameplay. Game state remains host-authoritative.
 
+The canonical source is the `server/` directory in the private
+`modular-party-table` repository. A GitHub Actions workflow publishes this
+directory to the deploy-only repository, which triggers Render automatically.
+
 ## Start
 
 ```bash
