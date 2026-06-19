@@ -22,6 +22,23 @@ uvicorn main:app --host 0.0.0.0 --port 8080 --reload
 
 Open `http://127.0.0.1:8080/docs` for the REST API documentation.
 
+## Render Free deployment
+
+The repository root includes `render.yaml`. It creates one free Python web
+service with `server/` as its root directory.
+
+Production endpoints:
+
+```text
+https://modular-party-table.onrender.com/health
+wss://modular-party-table.onrender.com/ws
+```
+
+Render Free sleeps after 15 minutes without inbound traffic. A new HTTP request
+or WebSocket connection wakes it, which can take about one minute. Connected
+Godot clients send a heartbeat every 20 seconds, so an active room remains
+awake.
+
 ## Test three signaling clients
 
 Keep the server running, then use another terminal:
