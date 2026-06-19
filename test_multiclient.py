@@ -70,6 +70,30 @@ async def run() -> None:
             "and relayed a private vote"
         )
 
+    async with (
+        websockets.connect(SERVER_URL) as host_one,
+        websockets.connect(SERVER_URL) as host_two,
+        websockets.connect(SERVER_URL) as invalid_guest,
+    ):
+        await receive(host_one)
+        await receive(host_two)
+        await receive(invalid_guest)
+        await host_one.send(json.dumps({"type": "create_room"}))
+        await host_two.send(json.dumps({"type": "create_room"}))
+        room_one = (await receive(host_one))["roomCode"]
+        room_two = (await receive(host_two))["roomCode"]
+        assert room_one != room_two
+
+        await invalid_guest.send(
+            json.dumps({"type": "join_room", "roomCode": "ZZZZZZ"})
+        )
+        error = await receive(invalid_guest)
+        assert error == {"type": "error", "code": "ROOM_NOT_FOUND"}
+
+        print(
+            "PASS: room codes are unique and unknown codes are rejected"
+        )
+
 
 if __name__ == "__main__":
     asyncio.run(run())
