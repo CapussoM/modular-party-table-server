@@ -3,12 +3,19 @@
 This single FastAPI application provides:
 
 - REST mock endpoints for profiles and rewarded-ad tokens
-- WebSocket room signaling
+- WebSocket room presence and signaling
 - SDP offer, answer, and ICE forwarding
 - temporary room presence and cleanup
 - deep-link metadata
 
-It does not process or store gameplay. Game state remains host-authoritative.
+Normal gameplay travels over direct WebRTC data channels and does not pass
+through this server. Game state remains host-authoritative.
+
+`ALLOW_APP_RELAY=true` enables a targeted WebSocket fallback for peers whose
+networks cannot establish a direct route. It defaults to `false` for the lowest
+possible server bandwidth. `MAX_ROOM_PEERS`, `MAX_SIGNAL_BYTES`, and
+`MAX_APP_BYTES` bound server work and memory use. Connections exceeding
+`MAX_MESSAGES_PER_SECOND` are closed.
 
 The canonical source is the `server/` directory in the private
 `modular-party-table` repository. A GitHub Actions workflow publishes this

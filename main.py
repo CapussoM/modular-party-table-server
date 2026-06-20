@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import secrets
 import time
@@ -10,10 +11,16 @@ from typing import Any
 
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from pydantic import BaseModel
+from websockets.exceptions import ConnectionClosed
 
 
 ROOM_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
 ROOM_TTL_SECONDS = int(os.getenv("ROOM_TTL_SECONDS", "600"))
+ALLOW_APP_RELAY = os.getenv("ALLOW_APP_RELAY", "false").lower() == "true"
+MAX_ROOM_PEERS = int(os.getenv("MAX_ROOM_PEERS", "16"))
+MAX_SIGNAL_BYTES = int(os.getenv("MAX_SIGNAL_BYTES", "131072"))
+MAX_APP_BYTES = int(os.getenv("MAX_APP_BYTES", "65536"))
+MAX_MESSAGES_PER_SECOND = int(os.getenv("MAX_MESSAGES_PER_SECOND", "120"))
 PUBLIC_JOIN_BASE_URL = os.getenv(
     "PUBLIC_JOIN_BASE_URL", "https://example.com/join"
 ).rstrip("/")
@@ -24,7 +31,10 @@ class Peer:
     peer_id: str
     websocket: WebSocket
     room_code: str | None = None
+    profile: dict[str, Any] = field(default_factory=dict)
     last_seen: float = field(default_factory=time.monotonic)
+    rate_window_started: float = field(default_factory=time.monotonic)
+    rate_window_messages: int = 0
 
 
 rooms: dict[str, dict[str, Peer]] = {}
@@ -38,11 +48,30 @@ def create_room_code() -> str:
             return code
 
 
+def sanitize_profile(value: Any) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        return {}
+    entitlement_ids = value.get("owned_entitlements", [])
+    if not isinstance(entitlement_ids, list):
+        entitlement_ids = []
+    return {
+        "display_name": str(value.get("display_name", "Player"))[:40],
+        "ready": bool(value.get("ready", True)),
+        "owned_entitlements": [
+            str(item)[:128] for item in entitlement_ids[:32]
+        ],
+    }
+
+
+def public_peer(peer: Peer) -> dict[str, Any]:
+    return {"peerId": peer.peer_id, "profile": peer.profile}
+
+
 async def send(peer: Peer, message: dict[str, Any]) -> bool:
     try:
         await peer.websocket.send_json(message)
         return True
-    except (RuntimeError, WebSocketDisconnect):
+    except (RuntimeError, WebSocketDisconnect, ConnectionClosed):
         return False
 
 
@@ -145,13 +174,38 @@ async def signaling_socket(websocket: WebSocket) -> None:
     await websocket.accept()
     peer = Peer(peer_id=secrets.token_hex(8), websocket=websocket)
     peers[peer.peer_id] = peer
-    await send(peer, {"type": "connected", "peerId": peer.peer_id})
+    await send(
+        peer,
+        {
+            "type": "connected",
+            "peerId": peer.peer_id,
+            "relayEnabled": ALLOW_APP_RELAY,
+        },
+    )
 
     try:
         while True:
             message = await websocket.receive_json()
-            peer.last_seen = time.monotonic()
+            now = time.monotonic()
+            peer.last_seen = now
+            if now - peer.rate_window_started >= 1:
+                peer.rate_window_started = now
+                peer.rate_window_messages = 0
+            peer.rate_window_messages += 1
+            if peer.rate_window_messages > MAX_MESSAGES_PER_SECOND:
+                await websocket.close(code=1008, reason="rate limit")
+                break
+            if not isinstance(message, dict):
+                await send(peer, {"type": "error", "code": "INVALID_MESSAGE"})
+                continue
             message_type = message.get("type")
+
+            encoded_message = json.dumps(
+                message, separators=(",", ":"), ensure_ascii=False
+            ).encode("utf-8")
+            if len(encoded_message) > MAX_SIGNAL_BYTES:
+                await send(peer, {"type": "error", "code": "MESSAGE_TOO_LARGE"})
+                continue
 
             if message_type == "ping":
                 await send(peer, {"type": "pong"})
@@ -159,6 +213,7 @@ async def signaling_socket(websocket: WebSocket) -> None:
 
             if message_type == "create_room":
                 await leave_room(peer)
+                peer.profile = sanitize_profile(message.get("profile", {}))
                 code = create_room_code()
                 peer.room_code = code
                 rooms[code] = {peer.peer_id: peer}
@@ -183,9 +238,17 @@ async def signaling_socket(websocket: WebSocket) -> None:
                         {"type": "error", "code": "ROOM_NOT_FOUND"},
                     )
                     continue
+                if len(room) >= MAX_ROOM_PEERS:
+                    await send(
+                        peer,
+                        {"type": "error", "code": "ROOM_FULL"},
+                    )
+                    continue
 
                 await leave_room(peer)
-                existing_peer_ids = list(room)
+                peer.profile = sanitize_profile(message.get("profile", {}))
+                existing_peers = [public_peer(existing) for existing in room.values()]
+                existing_peer_ids = [existing["peerId"] for existing in existing_peers]
                 peer.room_code = code
                 room[peer.peer_id] = peer
                 await send(
@@ -194,6 +257,7 @@ async def signaling_socket(websocket: WebSocket) -> None:
                         "type": "room_joined",
                         "roomCode": code,
                         "peerIds": existing_peer_ids,
+                        "peers": existing_peers,
                     },
                 )
                 for other in list(room.values()):
@@ -203,6 +267,7 @@ async def signaling_socket(websocket: WebSocket) -> None:
                             {
                                 "type": "peer_joined",
                                 "peerId": peer.peer_id,
+                                "profile": peer.profile,
                             },
                         )
                 continue
@@ -228,6 +293,12 @@ async def signaling_socket(websocket: WebSocket) -> None:
                 continue
 
             if message_type == "app":
+                if not ALLOW_APP_RELAY:
+                    await send(
+                        peer,
+                        {"type": "error", "code": "RELAY_DISABLED"},
+                    )
+                    continue
                 if not peer.room_code:
                     await send(
                         peer,
@@ -237,24 +308,35 @@ async def signaling_socket(websocket: WebSocket) -> None:
 
                 room = rooms.get(peer.room_code, {})
                 target_id = str(message.get("targetPeerId", ""))
+                if not target_id:
+                    await send(
+                        peer,
+                        {"type": "error", "code": "RELAY_TARGET_REQUIRED"},
+                    )
+                    continue
+                payload = message.get("payload", {})
+                encoded_payload = json.dumps(
+                    payload, separators=(",", ":"), ensure_ascii=False
+                ).encode("utf-8")
+                if len(encoded_payload) > MAX_APP_BYTES:
+                    await send(
+                        peer,
+                        {"type": "error", "code": "APP_MESSAGE_TOO_LARGE"},
+                    )
+                    continue
                 forwarded = {
                     "type": "app",
                     "fromPeerId": peer.peer_id,
-                    "payload": message.get("payload", {}),
+                    "payload": payload,
                 }
-                if target_id:
-                    target = room.get(target_id)
-                    if target is None:
-                        await send(
-                            peer,
-                            {"type": "error", "code": "PEER_NOT_FOUND"},
-                        )
-                    else:
-                        await send(target, forwarded)
+                target = room.get(target_id)
+                if target is None:
+                    await send(
+                        peer,
+                        {"type": "error", "code": "PEER_NOT_FOUND"},
+                    )
                 else:
-                    for other in list(room.values()):
-                        if other.peer_id != peer.peer_id:
-                            await send(other, forwarded)
+                    await send(target, forwarded)
                 continue
 
             await send(
