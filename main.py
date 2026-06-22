@@ -19,7 +19,7 @@ ROOM_TTL_SECONDS = int(os.getenv("ROOM_TTL_SECONDS", "600"))
 ALLOW_APP_RELAY = os.getenv("ALLOW_APP_RELAY", "false").lower() == "true"
 MAX_ROOM_PEERS = int(os.getenv("MAX_ROOM_PEERS", "16"))
 MAX_SIGNAL_BYTES = int(os.getenv("MAX_SIGNAL_BYTES", "131072"))
-MAX_APP_BYTES = int(os.getenv("MAX_APP_BYTES", "65536"))
+MAX_APP_BYTES = int(os.getenv("MAX_APP_BYTES", "524288"))
 MAX_MESSAGES_PER_SECOND = int(os.getenv("MAX_MESSAGES_PER_SECOND", "120"))
 PUBLIC_JOIN_BASE_URL = os.getenv(
     "PUBLIC_JOIN_BASE_URL", "https://example.com/join"
@@ -35,6 +35,9 @@ class Peer:
     last_seen: float = field(default_factory=time.monotonic)
     rate_window_started: float = field(default_factory=time.monotonic)
     rate_window_messages: int = 0
+    game_id: str = ""
+    public_room: bool = False
+    max_players: int = MAX_ROOM_PEERS
 
 
 rooms: dict[str, dict[str, Peer]] = {}
@@ -65,6 +68,18 @@ def sanitize_profile(value: Any) -> dict[str, Any]:
 
 def public_peer(peer: Peer) -> dict[str, Any]:
     return {"peerId": peer.peer_id, "profile": peer.profile}
+
+
+def requested_room_capacity(message: dict[str, Any]) -> int:
+    try:
+        requested = int(message.get("maxPlayers", MAX_ROOM_PEERS))
+    except (TypeError, ValueError):
+        requested = MAX_ROOM_PEERS
+    return max(2, min(requested, MAX_ROOM_PEERS))
+
+
+def room_host(room: dict[str, Peer]) -> Peer | None:
+    return next(iter(room.values()), None)
 
 
 async def send(peer: Peer, message: dict[str, Any]) -> bool:
@@ -211,10 +226,25 @@ async def signaling_socket(websocket: WebSocket) -> None:
                 await send(peer, {"type": "pong"})
                 continue
 
+            if message_type == "set_room_public":
+                if peer.room_code:
+                    room = rooms.get(peer.room_code, {})
+                    host = room_host(room)
+                    if host and host.peer_id == peer.peer_id:
+                        peer.public_room = bool(message.get("public", False))
+                        await send(peer, {
+                            "type": "room_public_updated",
+                            "public": peer.public_room,
+                        })
+                continue
+
             if message_type == "create_room":
                 await leave_room(peer)
                 peer.profile = sanitize_profile(message.get("profile", {}))
                 code = create_room_code()
+                peer.game_id = str(message.get("gameId", ""))[:64]
+                peer.public_room = bool(message.get("public", False))
+                peer.max_players = requested_room_capacity(message)
                 peer.room_code = code
                 rooms[code] = {peer.peer_id: peer}
                 await send(
@@ -229,6 +259,56 @@ async def signaling_socket(websocket: WebSocket) -> None:
                 )
                 continue
 
+            if message_type == "quick_join":
+                game_id = str(message.get("gameId", ""))[:64]
+                available = next(
+                    (
+                        (code, room)
+                        for code, room in rooms.items()
+                        if room
+                        and room_host(room).public_room
+                        and room_host(room).game_id == game_id
+                        and len(room) < room_host(room).max_players
+                    ),
+                    None,
+                )
+                if available is None:
+                    await leave_room(peer)
+                    peer.profile = sanitize_profile(message.get("profile", {}))
+                    code = create_room_code()
+                    peer.game_id = game_id
+                    peer.public_room = True
+                    peer.max_players = requested_room_capacity(message)
+                    peer.room_code = code
+                    rooms[code] = {peer.peer_id: peer}
+                    await send(peer, {
+                        "type": "room_created",
+                        "roomCode": code,
+                        "inviteLink": f"modularpartytable://join?room={code}",
+                    })
+                    continue
+                code, room = available
+                await leave_room(peer)
+                peer.profile = sanitize_profile(message.get("profile", {}))
+                existing_peers = [public_peer(existing) for existing in room.values()]
+                peer.room_code = code
+                peer.game_id = game_id
+                room[peer.peer_id] = peer
+                await send(peer, {
+                    "type": "room_joined",
+                    "roomCode": code,
+                    "peerIds": [item["peerId"] for item in existing_peers],
+                    "peers": existing_peers,
+                })
+                for other in list(room.values()):
+                    if other.peer_id != peer.peer_id:
+                        await send(other, {
+                            "type": "peer_joined",
+                            "peerId": peer.peer_id,
+                            "profile": peer.profile,
+                        })
+                continue
+
             if message_type == "join_room":
                 code = str(message.get("roomCode", "")).upper()
                 room = rooms.get(code)
@@ -238,7 +318,8 @@ async def signaling_socket(websocket: WebSocket) -> None:
                         {"type": "error", "code": "ROOM_NOT_FOUND"},
                     )
                     continue
-                if len(room) >= MAX_ROOM_PEERS:
+                host = room_host(room)
+                if host is None or len(room) >= host.max_players:
                     await send(
                         peer,
                         {"type": "error", "code": "ROOM_FULL"},

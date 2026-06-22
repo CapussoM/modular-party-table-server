@@ -7,6 +7,9 @@ This single FastAPI application provides:
 - SDP offer, answer, and ICE forwarding
 - temporary room presence and cleanup
 - deep-link metadata
+- public-room matchmaking filtered by game
+- automatic public-room creation when no compatible lobby is available
+- host-selected room capacity enforced for code joins and matchmaking
 
 Normal gameplay travels over direct WebRTC data channels and does not pass
 through this server. Game state remains host-authoritative.
@@ -16,6 +19,9 @@ networks cannot establish a direct route. It defaults to `false` for the lowest
 possible server bandwidth. `MAX_ROOM_PEERS`, `MAX_SIGNAL_BYTES`, and
 `MAX_APP_BYTES` bound server work and memory use. Connections exceeding
 `MAX_MESSAGES_PER_SECOND` are closed.
+
+Drawing games use compact normalized strokes. The default `MAX_APP_BYTES` is
+512 KB so complete Telesketch chains can also travel through the relay fallback.
 
 The canonical source is the `server/` directory in the private
 `modular-party-table` repository. A GitHub Actions workflow publishes this
@@ -60,6 +66,6 @@ source .venv/bin/activate
 python test_multiclient.py
 ```
 
-The script creates one host and joins two guests through independent WebSocket
-connections. This tests room presence and signaling, not Godot gameplay
-replication.
+The script tests room presence, signaling and public quick join. It verifies
+that private rooms are ignored and that matchmaking selects a public room for
+the requested game.

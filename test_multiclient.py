@@ -111,6 +111,99 @@ async def run() -> None:
             "PASS: room codes are unique and unknown codes are rejected"
         )
 
+    async with (
+        websockets.connect(SERVER_URL) as limited_host,
+        websockets.connect(SERVER_URL) as allowed_guest,
+        websockets.connect(SERVER_URL) as rejected_guest,
+    ):
+        for socket in [limited_host, allowed_guest, rejected_guest]:
+            await receive(socket)
+        await limited_host.send(json.dumps({
+            "type": "create_room",
+            "maxPlayers": 2,
+            "profile": {"display_name": "Limited Host"},
+        }))
+        limited_code = (await receive(limited_host))["roomCode"]
+        await allowed_guest.send(json.dumps({
+            "type": "join_room",
+            "roomCode": limited_code,
+            "profile": {"display_name": "Allowed Guest"},
+        }))
+        assert (await receive(allowed_guest))["type"] == "room_joined"
+        await receive(limited_host)
+        await rejected_guest.send(json.dumps({
+            "type": "join_room",
+            "roomCode": limited_code,
+            "profile": {"display_name": "Rejected Guest"},
+        }))
+        assert await receive(rejected_guest) == {
+            "type": "error",
+            "code": "ROOM_FULL",
+        }
+        print("PASS: host-selected room capacity is enforced by the server")
+
+    async with (
+        websockets.connect(SERVER_URL) as private_host,
+        websockets.connect(SERVER_URL) as color_host,
+        websockets.connect(SERVER_URL) as sketch_host,
+        websockets.connect(SERVER_URL) as quick_guest,
+    ):
+        for socket in [private_host, color_host, sketch_host, quick_guest]:
+            await receive(socket)
+        await private_host.send(json.dumps({
+            "type": "create_room",
+            "gameId": "color_clash",
+            "public": False,
+            "profile": {"display_name": "Private"},
+        }))
+        private_code = (await receive(private_host))["roomCode"]
+        await color_host.send(json.dumps({
+            "type": "create_room",
+            "gameId": "color_clash",
+            "public": True,
+            "profile": {"display_name": "Color Host"},
+        }))
+        color_code = (await receive(color_host))["roomCode"]
+        await sketch_host.send(json.dumps({
+            "type": "create_room",
+            "gameId": "sketch_relay",
+            "public": True,
+            "profile": {"display_name": "Sketch Host"},
+        }))
+        await receive(sketch_host)
+        await quick_guest.send(json.dumps({
+            "type": "quick_join",
+            "gameId": "color_clash",
+            "profile": {"display_name": "Quick Guest"},
+        }))
+        joined = await receive(quick_guest)
+        notice = await receive(color_host)
+        assert joined["type"] == "room_joined"
+        assert joined["roomCode"] == color_code
+        assert joined["roomCode"] != private_code
+        assert notice["profile"]["display_name"] == "Quick Guest"
+        await color_host.send(json.dumps({
+            "type": "set_room_public",
+            "public": False,
+        }))
+        public_update = await receive(color_host)
+        assert public_update == {
+            "type": "room_public_updated",
+            "public": False,
+        }
+        print("PASS: quick join selects a public room for the requested game")
+
+    async with websockets.connect(SERVER_URL) as first_player:
+        await receive(first_player)
+        await first_player.send(json.dumps({
+            "type": "quick_join",
+            "gameId": "rapid_quiz",
+            "profile": {"display_name": "First Player"},
+        }))
+        created = await receive(first_player)
+        assert created["type"] == "room_created"
+        print("PASS: first quick-match player becomes the lobby leader")
+
 
 if __name__ == "__main__":
     asyncio.run(run())
