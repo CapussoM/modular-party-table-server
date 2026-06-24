@@ -238,6 +238,11 @@ async def signaling_socket(websocket: WebSocket) -> None:
                         })
                 continue
 
+            if message_type == "leave_room":
+                await leave_room(peer)
+                await send(peer, {"type": "room_left"})
+                continue
+
             if message_type == "create_room":
                 await leave_room(peer)
                 peer.profile = sanitize_profile(message.get("profile", {}))

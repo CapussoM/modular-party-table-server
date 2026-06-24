@@ -64,6 +64,16 @@ async def run() -> None:
         assert host_notice_two["type"] == "peer_joined"
         assert guest_one_notice["type"] == "peer_joined"
 
+        await guest_two.send(json.dumps({"type": "leave_room"}))
+        assert (await receive(guest_two))["type"] == "room_left"
+        host_left_notice = await receive(host)
+        guest_one_left_notice = await receive(guest_one)
+        assert host_left_notice == {
+            "type": "peer_left",
+            "peerId": guest_two_connected["peerId"],
+        }
+        assert guest_one_left_notice == host_left_notice
+
         await guest_one.send(json.dumps({
             "type": "offer",
             "targetPeerId": host_connected["peerId"],
