@@ -9,10 +9,12 @@ from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass, field
 from typing import Any
 
-from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
+import httpx
+from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from pydantic import BaseModel
 from websockets.exceptions import ConnectionClosed
 
+from admob_ssv import AdMobSsvVerifier, RewardStore
 
 ROOM_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
 ROOM_TTL_SECONDS = int(os.getenv("ROOM_TTL_SECONDS", "600"))
@@ -24,6 +26,10 @@ MAX_MESSAGES_PER_SECOND = int(os.getenv("MAX_MESSAGES_PER_SECOND", "120"))
 PUBLIC_JOIN_BASE_URL = os.getenv(
     "PUBLIC_JOIN_BASE_URL", "https://example.com/join"
 ).rstrip("/")
+ADMOB_REWARDED_AD_UNIT_ID = os.getenv(
+    "ADMOB_REWARDED_AD_UNIT_ID",
+    "ca-app-pub-7010865599450469/6336433932",
+)
 
 
 @dataclass
@@ -42,6 +48,8 @@ class Peer:
 
 rooms: dict[str, dict[str, Peer]] = {}
 peers: dict[str, Peer] = {}
+admob_ssv = AdMobSsvVerifier(ADMOB_REWARDED_AD_UNIT_ID)
+verified_rewards = RewardStore()
 
 
 def create_room_code() -> str:
@@ -170,6 +178,35 @@ async def mock_ad_reward() -> RewardResponse:
         token=secrets.token_urlsafe(32),
         expires_in_seconds=600,
     )
+
+
+@app.get("/admob/ssv")
+async def admob_reward_callback(request: Request) -> dict[str, bool]:
+    try:
+        reward = await admob_ssv.verify(request.scope["query_string"])
+    except (ValueError, httpx.HTTPError) as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+    verified_rewards.put(reward)
+    return {"ok": True}
+
+
+@app.get("/admob/rewards/{nonce}")
+async def admob_reward_status(
+    nonce: str,
+    player_id: str,
+) -> dict[str, Any]:
+    reward = verified_rewards.get(nonce, player_id)
+    if reward is None:
+        return {"verified": False}
+    return {
+        "verified": True,
+        "transaction_id": reward.transaction_id,
+        "placement_id": reward.placement_id,
+        "game_id": reward.game_id,
+        "room_code": reward.room_code,
+        "reward_amount": reward.reward_amount,
+        "reward_item": reward.reward_item,
+    }
 
 
 @app.get("/join/{room_code}")

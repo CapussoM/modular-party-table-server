@@ -10,6 +10,7 @@ This single FastAPI application provides:
 - public-room matchmaking filtered by game
 - automatic public-room creation when no compatible lobby is available
 - host-selected room capacity enforced for code joins and matchmaking
+- cryptographically verified AdMob rewarded SSV callbacks
 
 Normal gameplay travels over direct WebRTC data channels and does not pass
 through this server. Game state remains host-authoritative.
@@ -49,7 +50,13 @@ Production endpoints:
 ```text
 https://modular-party-table.onrender.com/health
 wss://modular-party-table.onrender.com/ws
+https://modular-party-table.onrender.com/admob/ssv
 ```
+
+Configure that HTTPS URL as the server-side verification callback for the
+Android `UnlockAd` rewarded unit. The server verifies Google's ECDSA signature,
+the production ad unit ID, callback age and transaction replay before exposing
+the short-lived result to the app.
 
 Render Free sleeps after 15 minutes without inbound traffic. A new HTTP request
 or WebSocket connection wakes it, which can take about one minute. Connected
