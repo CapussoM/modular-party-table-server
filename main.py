@@ -26,10 +26,20 @@ MAX_MESSAGES_PER_SECOND = int(os.getenv("MAX_MESSAGES_PER_SECOND", "120"))
 PUBLIC_JOIN_BASE_URL = os.getenv(
     "PUBLIC_JOIN_BASE_URL", "https://example.com/join"
 ).rstrip("/")
-ADMOB_REWARDED_AD_UNIT_ID = os.getenv(
-    "ADMOB_REWARDED_AD_UNIT_ID",
-    "ca-app-pub-7010865599450469/6336433932",
-)
+ADMOB_REWARDED_AD_UNIT_IDS = [
+    unit.strip()
+    for unit in os.getenv(
+        "ADMOB_REWARDED_AD_UNIT_IDS",
+        os.getenv(
+            "ADMOB_REWARDED_AD_UNIT_ID",
+            (
+                "ca-app-pub-7010865599450469/6336433932,"
+                "ca-app-pub-7010865599450469/2585459402"
+            ),
+        ),
+    ).split(",")
+    if unit.strip()
+]
 
 
 @dataclass
@@ -48,7 +58,7 @@ class Peer:
 
 rooms: dict[str, dict[str, Peer]] = {}
 peers: dict[str, Peer] = {}
-admob_ssv = AdMobSsvVerifier(ADMOB_REWARDED_AD_UNIT_ID)
+admob_ssv = AdMobSsvVerifier(ADMOB_REWARDED_AD_UNIT_IDS)
 verified_rewards = RewardStore()
 
 

@@ -35,8 +35,12 @@ class VerifiedReward:
 
 
 class AdMobSsvVerifier:
-    def __init__(self, expected_ad_unit: str) -> None:
-        self.expected_ad_unit = expected_ad_unit
+    def __init__(self, expected_ad_units: str | list[str] | tuple[str, ...]) -> None:
+        if isinstance(expected_ad_units, str):
+            expected_ad_units = [expected_ad_units]
+        self.expected_ad_units = {
+            unit.strip() for unit in expected_ad_units if unit.strip()
+        }
         self._keys: dict[int, ec.EllipticCurvePublicKey] = {}
         self._keys_loaded_at = 0.0
         self._key_lock = asyncio.Lock()
@@ -50,7 +54,7 @@ class AdMobSsvVerifier:
             raise ValueError("invalid_signature") from error
 
         ad_unit = self._one(values, "ad_unit")
-        if self.expected_ad_unit and ad_unit != self.expected_ad_unit:
+        if self.expected_ad_units and ad_unit not in self.expected_ad_units:
             raise ValueError("unexpected_ad_unit")
 
         timestamp_ms = int(self._one(values, "timestamp"))
