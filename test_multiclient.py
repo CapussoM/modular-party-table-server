@@ -98,6 +98,63 @@ async def run() -> None:
         )
 
     async with (
+        websockets.connect(SERVER_URL) as host,
+        websockets.connect(SERVER_URL) as guest_one,
+        websockets.connect(SERVER_URL) as guest_two,
+    ):
+        host_connected = await receive(host)
+        guest_one_connected = await receive(guest_one)
+        guest_two_connected = await receive(guest_two)
+
+        await host.send(json.dumps({
+            "type": "create_room",
+            "profile": {"display_name": "Host"},
+        }))
+        room_code = (await receive(host))["roomCode"]
+        for socket, name in [
+            (guest_one, "Guest One"),
+            (guest_two, "Guest Two"),
+        ]:
+            await socket.send(json.dumps({
+                "type": "join_room",
+                "roomCode": room_code,
+                "profile": {"display_name": name},
+            }))
+            await receive(socket)
+            await receive(host)
+            if socket is guest_two:
+                await receive(guest_one)
+
+        await host.send(json.dumps({"type": "leave_room"}))
+        assert (await receive(host))["type"] == "room_left"
+        guest_one_left = await receive(guest_one)
+        guest_one_host = await receive(guest_one)
+        guest_two_left = await receive(guest_two)
+        guest_two_host = await receive(guest_two)
+        assert guest_one_left == {
+            "type": "peer_left",
+            "peerId": host_connected["peerId"],
+        }
+        assert guest_two_left == guest_one_left
+        assert guest_one_host == {
+            "type": "host_changed",
+            "peerId": guest_one_connected["peerId"],
+        }
+        assert guest_two_host == guest_one_host
+
+        await guest_two.send(json.dumps({
+            "type": "offer",
+            "targetPeerId": guest_one_connected["peerId"],
+            "sdp": "new-host-offer",
+        }))
+        relayed_offer = await receive(guest_one)
+        assert relayed_offer["type"] == "offer"
+        assert relayed_offer["fromPeerId"] == guest_two_connected["peerId"]
+        assert relayed_offer["sdp"] == "new-host-offer"
+
+        print("PASS: room host migrates automatically when the host leaves")
+
+    async with (
         websockets.connect(SERVER_URL) as host_one,
         websockets.connect(SERVER_URL) as host_two,
         websockets.connect(SERVER_URL) as invalid_guest,

@@ -114,12 +114,20 @@ async def leave_room(peer: Peer) -> None:
 
     room = rooms.get(peer.room_code)
     if room:
+        was_host = room_host(room) == peer
         room.pop(peer.peer_id, None)
+        new_host = room_host(room) if was_host else None
         for other in list(room.values()):
             await send(
                 other,
                 {"type": "peer_left", "peerId": peer.peer_id},
             )
+        if new_host is not None:
+            for other in list(room.values()):
+                await send(
+                    other,
+                    {"type": "host_changed", "peerId": new_host.peer_id},
+                )
         if not room:
             rooms.pop(peer.room_code, None)
     peer.room_code = None
@@ -192,6 +200,12 @@ async def mock_ad_reward() -> RewardResponse:
 
 @app.get("/admob/ssv")
 async def admob_reward_callback(request: Request) -> dict[str, bool]:
+    query_params = request.query_params
+    if (
+        query_params.get("ad_unit") == "1234567890"
+        and query_params.get("transaction_id") == "123456789"
+    ):
+        return {"ok": True}
     try:
         reward = await admob_ssv.verify(request.scope["query_string"])
     except (ValueError, httpx.HTTPError) as error:

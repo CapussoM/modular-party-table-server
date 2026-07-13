@@ -22,7 +22,7 @@ possible server bandwidth. `MAX_ROOM_PEERS`, `MAX_SIGNAL_BYTES`, and
 `MAX_MESSAGES_PER_SECOND` are closed.
 
 Drawing games use compact normalized strokes. The default `MAX_APP_BYTES` is
-512 KB so complete Telesketch chains can also travel through the relay fallback.
+512 KB so complete drawing-relay chains can also travel through the relay fallback.
 
 The canonical source is the `server/` directory in the private
 `modular-party-table` repository. A GitHub Actions workflow publishes this
@@ -48,9 +48,9 @@ service with `server/` as its root directory.
 Production endpoints:
 
 ```text
-https://modular-party-table.onrender.com/health
-wss://modular-party-table.onrender.com/ws
-https://modular-party-table.onrender.com/admob/ssv
+https://stegosaurini.molelabs.eu/health
+wss://stegosaurini.molelabs.eu/ws
+https://stegosaurini.molelabs.eu/admob/ssv
 ```
 
 Configure that HTTPS URL as the server-side verification callback for the
