@@ -115,8 +115,17 @@ async def leave_room(peer: Peer) -> None:
     room = rooms.get(peer.room_code)
     if room:
         was_host = room_host(room) == peer
+        previous_game_id = peer.game_id
+        previous_public_room = peer.public_room
+        previous_max_players = peer.max_players
         room.pop(peer.peer_id, None)
         new_host = room_host(room) if was_host else None
+        if new_host is not None:
+            # Matchmaking metadata belongs to the room, not to the departing
+            # host's connection. Preserve it when host authority migrates.
+            new_host.game_id = previous_game_id
+            new_host.public_room = previous_public_room
+            new_host.max_players = previous_max_players
         for other in list(room.values()):
             await send(
                 other,
@@ -296,6 +305,18 @@ async def signaling_socket(websocket: WebSocket) -> None:
                         await send(peer, {
                             "type": "room_public_updated",
                             "public": peer.public_room,
+                        })
+                continue
+
+            if message_type == "set_room_game":
+                if peer.room_code:
+                    room = rooms.get(peer.room_code, {})
+                    host = room_host(room)
+                    if host and host.peer_id == peer.peer_id:
+                        peer.game_id = str(message.get("gameId", ""))[:64]
+                        await send(peer, {
+                            "type": "room_game_updated",
+                            "gameId": peer.game_id,
                         })
                 continue
 

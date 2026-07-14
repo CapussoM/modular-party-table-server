@@ -260,6 +260,53 @@ async def run() -> None:
         }
         print("PASS: quick join selects a public room for the requested game")
 
+    async with (
+        websockets.connect(SERVER_URL) as host,
+        websockets.connect(SERVER_URL) as guest,
+        websockets.connect(SERVER_URL) as quick_guest,
+    ):
+        host_connected = await receive(host)
+        guest_connected = await receive(guest)
+        await receive(quick_guest)
+        await host.send(json.dumps({
+            "type": "create_room",
+            "gameId": "hidden_word",
+            "public": True,
+            "profile": {"display_name": "Host"},
+        }))
+        room_code = (await receive(host))["roomCode"]
+        await guest.send(json.dumps({
+            "type": "join_room",
+            "roomCode": room_code,
+            "profile": {"display_name": "Guest"},
+        }))
+        await receive(guest)
+        await receive(host)
+        await host.send(json.dumps({
+            "type": "set_room_game",
+            "gameId": "rapid_quiz",
+        }))
+        assert await receive(host) == {
+            "type": "room_game_updated",
+            "gameId": "rapid_quiz",
+        }
+        await host.send(json.dumps({"type": "leave_room"}))
+        assert (await receive(host))["type"] == "room_left"
+        assert (await receive(guest))["peerId"] == host_connected["peerId"]
+        assert await receive(guest) == {
+            "type": "host_changed",
+            "peerId": guest_connected["peerId"],
+        }
+        await quick_guest.send(json.dumps({
+            "type": "quick_join",
+            "gameId": "rapid_quiz",
+            "profile": {"display_name": "Quick Guest"},
+        }))
+        joined = await receive(quick_guest)
+        assert joined["type"] == "room_joined"
+        assert joined["roomCode"] == room_code
+        print("PASS: public matchmaking survives game changes and host migration")
+
     async with websockets.connect(SERVER_URL) as first_player:
         await receive(first_player)
         await first_player.send(json.dumps({
