@@ -5,7 +5,7 @@ import base64
 import json
 import time
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Optional
 from urllib.parse import parse_qs
 
 import httpx
@@ -186,7 +186,7 @@ class RewardStore:
         self._by_nonce[reward.nonce] = reward
         return True
 
-    def get(self, nonce: str, player_id: str) -> VerifiedReward | None:
+    def get(self, nonce: str, player_id: str) -> Optional[VerifiedReward]:
         self.cleanup()
         reward = self._by_nonce.get(nonce)
         if reward is None or reward.player_id != player_id:

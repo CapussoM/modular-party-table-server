@@ -11,6 +11,7 @@ This single FastAPI application provides:
 - automatic public-room creation when no compatible lobby is available
 - host-selected room capacity enforced for code joins and matchmaking
 - cryptographically verified AdMob rewarded SSV callbacks
+- automatic platform-identity sessions and persistent cloud profiles
 
 Normal gameplay travels over direct WebRTC data channels and does not pass
 through this server. Game state remains host-authoritative.
@@ -39,6 +40,23 @@ uvicorn main:app --host 0.0.0.0 --port 8080 --reload
 ```
 
 Open `http://127.0.0.1:8080/docs` for the REST API documentation.
+
+## Cloud profiles
+
+Cloud profiles use SQLite with optimistic revisions and opaque 90-day session
+tokens. Set `CLOUD_DB_PATH` to persistent storage in production. Android
+identity is verified by exchanging a Play Games server auth code; iOS identity
+is verified from the signed StoreKit 2 `AppTransaction` JWS.
+
+For local API tests only:
+
+```bash
+export CLOUD_ALLOW_DEBUG_IDENTITY=true
+export CLOUD_IDENTITY_PEPPER="$(openssl rand -hex 32)"
+```
+
+Production configuration and native client setup are documented in
+`docs/CLOUD_PROFILES.md`.
 
 ## Render Free deployment
 

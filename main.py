@@ -7,14 +7,27 @@ import secrets
 import time
 from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Optional
 
 import httpx
-from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
-from pydantic import BaseModel
+from fastapi import (
+    FastAPI,
+    Header,
+    HTTPException,
+    Request,
+    WebSocket,
+    WebSocketDisconnect,
+)
+from pydantic import BaseModel, Field
 from websockets.exceptions import ConnectionClosed
 
 from admob_ssv import AdMobSsvVerifier, RewardStore
+from cloud_profiles import (
+    CloudProfileStore,
+    ProfileRevisionConflict,
+    cloud_profile_response,
+)
+from platform_identity import PlatformIdentityError, PlatformIdentityVerifier
 
 ROOM_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
 ROOM_TTL_SECONDS = int(os.getenv("ROOM_TTL_SECONDS", "600"))
@@ -46,7 +59,7 @@ ADMOB_REWARDED_AD_UNIT_IDS = [
 class Peer:
     peer_id: str
     websocket: WebSocket
-    room_code: str | None = None
+    room_code: Optional[str] = None
     profile: dict[str, Any] = field(default_factory=dict)
     last_seen: float = field(default_factory=time.monotonic)
     rate_window_started: float = field(default_factory=time.monotonic)
@@ -60,6 +73,11 @@ rooms: dict[str, dict[str, Peer]] = {}
 peers: dict[str, Peer] = {}
 admob_ssv = AdMobSsvVerifier(ADMOB_REWARDED_AD_UNIT_IDS)
 verified_rewards = RewardStore()
+cloud_profiles = CloudProfileStore(
+    os.getenv("CLOUD_DB_PATH", "/tmp/stegosaurini-cloud.sqlite3"),
+    os.getenv("CLOUD_IDENTITY_PEPPER", ""),
+)
+platform_identity = PlatformIdentityVerifier.from_environment()
 
 
 def create_room_code() -> str:
@@ -96,7 +114,7 @@ def requested_room_capacity(message: dict[str, Any]) -> int:
     return max(2, min(requested, MAX_ROOM_PEERS))
 
 
-def room_host(room: dict[str, Peer]) -> Peer | None:
+def room_host(room: dict[str, Peer]) -> Optional[Peer]:
     return next(iter(room.values()), None)
 
 
@@ -181,6 +199,17 @@ class RewardResponse(BaseModel):
     expires_in_seconds: int
 
 
+class PlatformSessionRequest(BaseModel):
+    provider: str = Field(min_length=1, max_length=64)
+    credential: str = Field(min_length=1, max_length=16384)
+    initial_profile: dict[str, Any] = Field(default_factory=dict)
+
+
+class CloudProfileUpdate(BaseModel):
+    expected_revision: int = Field(ge=1)
+    profile: dict[str, Any] = Field(default_factory=dict)
+
+
 @app.get("/health")
 async def health() -> dict[str, Any]:
     return {
@@ -188,6 +217,82 @@ async def health() -> dict[str, Any]:
         "rooms": len(rooms),
         "peers": len(peers),
     }
+
+
+@app.post("/v1/cloud/session/platform")
+async def create_platform_cloud_session(
+    request: PlatformSessionRequest,
+) -> dict[str, Any]:
+    try:
+        identity = await platform_identity.verify(
+            request.provider,
+            request.credential,
+        )
+        session = cloud_profiles.create_session(
+            identity.provider,
+            identity.subject,
+            request.initial_profile,
+        )
+    except PlatformIdentityError as error:
+        raise HTTPException(
+            status_code=error.status_code,
+            detail=error.code,
+        ) from error
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+    return {
+        "session_token": session.token,
+        "expires_at": session.expires_at,
+        "created": session.created,
+        **cloud_profile_response(session.profile),
+    }
+
+
+@app.get("/v1/cloud/profile")
+async def get_cloud_profile(
+    authorization: Optional[str] = Header(default=None),
+) -> dict[str, Any]:
+    token = _bearer_token(authorization)
+    profile = cloud_profiles.get_profile_for_token(token)
+    if profile is None:
+        raise HTTPException(status_code=401, detail="cloud_session_invalid")
+    return cloud_profile_response(profile)
+
+
+@app.put("/v1/cloud/profile")
+async def update_cloud_profile(
+    request: CloudProfileUpdate,
+    authorization: Optional[str] = Header(default=None),
+) -> dict[str, Any]:
+    token = _bearer_token(authorization)
+    try:
+        profile = cloud_profiles.update_profile_for_token(
+            token,
+            request.expected_revision,
+            request.profile,
+        )
+    except ProfileRevisionConflict as error:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "profile_revision_conflict",
+                "current": cloud_profile_response(error.current),
+            },
+        ) from error
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+    if profile is None:
+        raise HTTPException(status_code=401, detail="cloud_session_invalid")
+    return cloud_profile_response(profile)
+
+
+@app.delete("/v1/cloud/session")
+async def revoke_cloud_session(
+    authorization: Optional[str] = Header(default=None),
+) -> dict[str, bool]:
+    token = _bearer_token(authorization)
+    cloud_profiles.revoke_session(token)
+    return {"ok": True}
 
 
 @app.get("/mock/profile", response_model=ProfileResponse)
@@ -252,6 +357,19 @@ async def join_link(room_code: str) -> dict[str, str]:
         "deepLink": f"modularpartytable://join?room={normalized}",
         "webLink": f"{PUBLIC_JOIN_BASE_URL}/{normalized}",
     }
+
+
+def _bearer_token(authorization: Optional[str]) -> str:
+    if authorization is None:
+        raise HTTPException(status_code=401, detail="cloud_session_missing")
+    scheme, separator, token = authorization.partition(" ")
+    if (
+        separator != " "
+        or scheme.lower() != "bearer"
+        or not token.strip()
+    ):
+        raise HTTPException(status_code=401, detail="cloud_session_invalid")
+    return token.strip()
 
 
 @app.websocket("/ws")
