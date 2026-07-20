@@ -96,6 +96,7 @@ def sanitize_profile(value: Any) -> dict[str, Any]:
     return {
         "display_name": str(value.get("display_name", "Player"))[:40],
         "ready": bool(value.get("ready", True)),
+        "reconnect_id": str(value.get("reconnect_id", ""))[:64],
         "owned_entitlements": [
             str(item)[:128] for item in entitlement_ids[:32]
         ],
@@ -126,7 +127,7 @@ async def send(peer: Peer, message: dict[str, Any]) -> bool:
         return False
 
 
-async def leave_room(peer: Peer) -> None:
+async def leave_room(peer: Peer, recoverable: bool = False) -> None:
     if not peer.room_code:
         return
 
@@ -147,7 +148,11 @@ async def leave_room(peer: Peer) -> None:
         for other in list(room.values()):
             await send(
                 other,
-                {"type": "peer_left", "peerId": peer.peer_id},
+                {
+                    "type": "peer_left",
+                    "peerId": peer.peer_id,
+                    "recoverable": recoverable,
+                },
             )
         if new_host is not None:
             for other in list(room.values()):
@@ -166,7 +171,7 @@ async def cleanup_rooms() -> None:
         expiry = time.monotonic() - ROOM_TTL_SECONDS
         stale = [peer for peer in peers.values() if peer.last_seen < expiry]
         for peer in stale:
-            await leave_room(peer)
+            await leave_room(peer, recoverable=True)
             peers.pop(peer.peer_id, None)
             with suppress(RuntimeError):
                 await peer.websocket.close(code=1001, reason="inactive")
@@ -388,7 +393,13 @@ async def signaling_socket(websocket: WebSocket) -> None:
 
     try:
         while True:
-            message = await websocket.receive_json()
+            try:
+                message = await websocket.receive_json()
+            except RuntimeError:
+                # Starlette can raise RuntimeError instead of
+                # WebSocketDisconnect when a mobile client drops immediately
+                # after leave_room or changes network.
+                break
             now = time.monotonic()
             peer.last_seen = now
             if now - peer.rate_window_started >= 1:
@@ -439,7 +450,7 @@ async def signaling_socket(websocket: WebSocket) -> None:
                 continue
 
             if message_type == "leave_room":
-                await leave_room(peer)
+                await leave_room(peer, recoverable=False)
                 await send(peer, {"type": "room_left"})
                 continue
 
@@ -629,8 +640,8 @@ async def signaling_socket(websocket: WebSocket) -> None:
                 peer,
                 {"type": "error", "code": "UNKNOWN_MESSAGE_TYPE"},
             )
-    except WebSocketDisconnect:
+    except (WebSocketDisconnect, ConnectionClosed):
         pass
     finally:
-        await leave_room(peer)
+        await leave_room(peer, recoverable=True)
         peers.pop(peer.peer_id, None)

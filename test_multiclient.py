@@ -8,6 +8,7 @@ import websockets
 
 
 SERVER_URL = os.getenv("SIGNALING_URL", "ws://127.0.0.1:8080/ws")
+EXPECT_APP_RELAY = os.getenv("EXPECT_APP_RELAY", "false").lower() == "true"
 
 
 async def receive(socket) -> dict:
@@ -53,7 +54,7 @@ async def run() -> None:
         guest_one_notice = await receive(guest_one)
 
         assert host_connected["type"] == "connected"
-        assert host_connected["relayEnabled"] is False
+        assert host_connected["relayEnabled"] is EXPECT_APP_RELAY
         assert guest_one_connected["type"] == "connected"
         assert guest_two_connected["type"] == "connected"
         assert joined_one["type"] == "room_joined"
@@ -71,6 +72,7 @@ async def run() -> None:
         assert host_left_notice == {
             "type": "peer_left",
             "peerId": guest_two_connected["peerId"],
+            "recoverable": False,
         }
         assert guest_one_left_notice == host_left_notice
 
@@ -87,10 +89,16 @@ async def run() -> None:
         await guest_one.send(json.dumps({
             "type": "app",
             "targetPeerId": host_connected["peerId"],
-            "payload": {"kind": "must_not_be_relayed"},
+            "payload": {"kind": "relay_probe"},
         }))
-        relay_error = await receive(guest_one)
-        assert relay_error == {"type": "error", "code": "RELAY_DISABLED"}
+        if EXPECT_APP_RELAY:
+            relayed_app = await receive(host)
+            assert relayed_app["type"] == "app"
+            assert relayed_app["fromPeerId"] == guest_one_connected["peerId"]
+            assert relayed_app["payload"] == {"kind": "relay_probe"}
+        else:
+            relay_error = await receive(guest_one)
+            assert relay_error == {"type": "error", "code": "RELAY_DISABLED"}
 
         print(
             f"PASS: room {room_code} connected one host, two guests, "
@@ -134,6 +142,7 @@ async def run() -> None:
         assert guest_one_left == {
             "type": "peer_left",
             "peerId": host_connected["peerId"],
+            "recoverable": False,
         }
         assert guest_two_left == guest_one_left
         assert guest_one_host == {

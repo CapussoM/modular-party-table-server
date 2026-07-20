@@ -94,3 +94,13 @@ python test_multiclient.py
 The script tests room presence, signaling and public quick join. It verifies
 that private rooms are ignored and that matchmaking selects a public room for
 the requested game.
+
+For a relay-enabled deployment and an unstable-connection check:
+
+```bash
+EXPECT_APP_RELAY=true SIGNALING_URL=wss://example.com/ws python test_multiclient.py
+SIGNALING_URL=wss://example.com/ws python test_unstable_network.py
+```
+
+The unstable-network test injects deterministic 20-250 ms jitter, abruptly
+drops a guest connection, rejoins the same room and verifies the next snapshot.
