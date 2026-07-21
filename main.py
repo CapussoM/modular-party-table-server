@@ -259,6 +259,7 @@ async def health() -> dict[str, Any]:
         "ok": True,
         "rooms": len(rooms),
         "peers": len(peers),
+        "analytics": analytics.status,
     }
 
 
@@ -527,6 +528,17 @@ async def signaling_socket(websocket: WebSocket) -> None:
                 peer.max_players = requested_room_capacity(message)
                 peer.room_code = code
                 rooms[code] = {peer.peer_id: peer}
+                analytics.record({
+                    "event_name": "room_created",
+                    "event_type": "event",
+                    "session_id": peer.peer_id,
+                    "properties": {
+                        "game_id": peer.game_id,
+                        "public": peer.public_room,
+                        "max_players": peer.max_players,
+                        "join_method": "create",
+                    },
+                })
                 await send(
                     peer,
                     {
@@ -561,6 +573,17 @@ async def signaling_socket(websocket: WebSocket) -> None:
                     peer.max_players = requested_room_capacity(message)
                     peer.room_code = code
                     rooms[code] = {peer.peer_id: peer}
+                    analytics.record({
+                        "event_name": "room_created",
+                        "event_type": "event",
+                        "session_id": peer.peer_id,
+                        "properties": {
+                            "game_id": peer.game_id,
+                            "public": True,
+                            "max_players": peer.max_players,
+                            "join_method": "quick_join_host",
+                        },
+                    })
                     await send(peer, {
                         "type": "room_created",
                         "roomCode": code,
@@ -574,6 +597,16 @@ async def signaling_socket(websocket: WebSocket) -> None:
                 peer.room_code = code
                 peer.game_id = game_id
                 room[peer.peer_id] = peer
+                analytics.record({
+                    "event_name": "room_joined",
+                    "event_type": "event",
+                    "session_id": peer.peer_id,
+                    "properties": {
+                        "game_id": peer.game_id,
+                        "room_size": len(room),
+                        "join_method": "quick_join",
+                    },
+                })
                 await send(peer, {
                     "type": "room_joined",
                     "roomCode": code,
@@ -638,6 +671,16 @@ async def signaling_socket(websocket: WebSocket) -> None:
                 existing_peer_ids = [existing["peerId"] for existing in existing_peers]
                 peer.room_code = code
                 room[peer.peer_id] = peer
+                analytics.record({
+                    "event_name": "room_joined",
+                    "event_type": "event",
+                    "session_id": peer.peer_id,
+                    "properties": {
+                        "game_id": room_host(room).game_id if room_host(room) else "",
+                        "room_size": len(room),
+                        "join_method": "code",
+                    },
+                })
                 await send(
                     peer,
                     {

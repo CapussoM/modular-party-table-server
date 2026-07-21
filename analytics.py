@@ -27,6 +27,12 @@ class AnalyticsStore:
     def enabled(self) -> bool:
         return bool(self._uri)
 
+    @property
+    def status(self) -> str:
+        if not self.enabled:
+            return "disabled"
+        return "connected" if self._client is not None else "unavailable"
+
     async def start(self) -> None:
         if not self.enabled:
             LOGGER.info("MongoDB analytics disabled: MONGODB_URI is not set")
