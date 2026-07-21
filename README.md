@@ -12,6 +12,25 @@ This single FastAPI application provides:
 - host-selected room capacity enforced for code joins and matchmaking
 - cryptographically verified AdMob rewarded SSV callbacks
 - automatic platform-identity sessions and persistent cloud profiles
+- best-effort MongoDB KPI and error event ingestion
+
+## Analytics and error logging (MongoDB)
+
+Set the connection string only in the server environment; never add it to
+`project.godot`, a mobile build, or source control:
+
+```bash
+export MONGODB_URI='mongodb+srv://USER:PASSWORD@HOST/?retryWrites=true&w=majority'
+export MONGODB_DATABASE='tabletop'
+export ANALYTICS_RETENTION_DAYS=180
+```
+
+Events are written to `tabletop.events`. The server creates indexes for event,
+session and time-range queries, plus a TTL index. If MongoDB is unavailable,
+gameplay continues and telemetry is dropped. The Godot client currently emits
+`app_started` and `game_started`; call
+`AppServices.analytics.track("event_name", properties)` for KPIs or
+`AppServices.analytics.error(code, message, context)` for handled errors.
 
 Normal gameplay travels over direct WebRTC data channels and does not pass
 through this server. Game state remains host-authoritative.

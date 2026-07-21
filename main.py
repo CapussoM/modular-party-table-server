@@ -5,6 +5,7 @@ import json
 import os
 import secrets
 import time
+import uuid
 from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass, field
 from typing import Any, Optional
@@ -28,6 +29,7 @@ from cloud_profiles import (
     cloud_profile_response,
 )
 from platform_identity import PlatformIdentityError, PlatformIdentityVerifier
+from analytics import AnalyticsStore
 
 ROOM_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
 ROOM_TTL_SECONDS = int(os.getenv("ROOM_TTL_SECONDS", "600"))
@@ -78,6 +80,8 @@ cloud_profiles = CloudProfileStore(
     os.getenv("CLOUD_IDENTITY_PEPPER", ""),
 )
 platform_identity = PlatformIdentityVerifier.from_environment()
+analytics = AnalyticsStore()
+analytics_rate_windows: dict[str, tuple[float, int]] = {}
 
 
 def create_room_code() -> str:
@@ -179,11 +183,13 @@ async def cleanup_rooms() -> None:
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
+    await analytics.start()
     cleanup_task = asyncio.create_task(cleanup_rooms())
     yield
     cleanup_task.cancel()
     with suppress(asyncio.CancelledError):
         await cleanup_task
+    await analytics.stop()
 
 
 app = FastAPI(
@@ -215,6 +221,38 @@ class CloudProfileUpdate(BaseModel):
     profile: dict[str, Any] = Field(default_factory=dict)
 
 
+class AnalyticsEvent(BaseModel):
+    event_name: str = Field(min_length=1, max_length=64, pattern=r"^[a-z0-9_.-]+$")
+    event_type: str = Field(default="event", max_length=32)
+    session_id: str = Field(default="", max_length=64)
+    install_id: str = Field(default="", max_length=64)
+    app_version: str = Field(default="", max_length=32)
+    platform: str = Field(default="", max_length=32)
+    properties: dict[str, Any] = Field(default_factory=dict)
+
+
+@app.middleware("http")
+async def record_unhandled_errors(request: Request, call_next):
+    request_id = request.headers.get("x-request-id", str(uuid.uuid4()))[:128]
+    try:
+        response = await call_next(request)
+    except Exception as error:
+        analytics.record({
+            "event_name": "server_error",
+            "event_type": "error",
+            "request_id": request_id,
+            "properties": {
+                "path": request.url.path[:256],
+                "method": request.method,
+                "exception_type": type(error).__name__,
+                "message": str(error)[:500],
+            },
+        })
+        raise
+    response.headers["x-request-id"] = request_id
+    return response
+
+
 @app.get("/health")
 async def health() -> dict[str, Any]:
     return {
@@ -222,6 +260,32 @@ async def health() -> dict[str, Any]:
         "rooms": len(rooms),
         "peers": len(peers),
     }
+
+
+@app.post("/v1/analytics/events", status_code=202)
+async def ingest_analytics_event(
+    event: AnalyticsEvent,
+    request: Request,
+) -> dict[str, bool]:
+    # Keep this public endpoint safe for a distributable mobile client: no DB
+    # credential is shipped, payloads are bounded, and IPs are not persisted.
+    if len(await request.body()) > 16_384:
+        raise HTTPException(status_code=413, detail="analytics_event_too_large")
+    client_key = request.client.host if request.client else "unknown"
+    window_started, event_count = analytics_rate_windows.get(
+        client_key, (time.monotonic(), 0)
+    )
+    now = time.monotonic()
+    if now - window_started >= 60:
+        window_started, event_count = now, 0
+    if event_count >= 60:
+        raise HTTPException(status_code=429, detail="analytics_rate_limited")
+    analytics_rate_windows[client_key] = (window_started, event_count + 1)
+    properties_json = json.dumps(event.properties, separators=(",", ":"))
+    if len(properties_json.encode("utf-8")) > 12_000:
+        raise HTTPException(status_code=413, detail="analytics_properties_too_large")
+    accepted = analytics.record(event.model_dump())
+    return {"accepted": accepted}
 
 
 @app.post("/v1/cloud/session/platform")
@@ -534,6 +598,32 @@ async def signaling_socket(websocket: WebSocket) -> None:
                         {"type": "error", "code": "ROOM_NOT_FOUND"},
                     )
                     continue
+                incoming_profile = sanitize_profile(message.get("profile", {}))
+                reconnect_id = incoming_profile.get("reconnect_id", "")
+                replaced_peer = next(
+                    (
+                        existing
+                        for existing in room.values()
+                        if reconnect_id
+                        and existing is not room_host(room)
+                        and existing.profile.get("reconnect_id", "") == reconnect_id
+                        and existing.peer_id != peer.peer_id
+                    ),
+                    None,
+                )
+                if replaced_peer is not None:
+                    # A network switch can open the replacement socket before the
+                    # old WebSocket reports its disconnect. Treat both sockets as
+                    # one player before the capacity check and before sending the
+                    # joining snapshot.
+                    room.pop(replaced_peer.peer_id, None)
+                    replaced_peer.room_code = None
+                    for other in list(room.values()):
+                        await send(other, {
+                            "type": "peer_left",
+                            "peerId": replaced_peer.peer_id,
+                            "recoverable": True,
+                        })
                 host = room_host(room)
                 if host is None or len(room) >= host.max_players:
                     await send(
@@ -543,7 +633,7 @@ async def signaling_socket(websocket: WebSocket) -> None:
                     continue
 
                 await leave_room(peer)
-                peer.profile = sanitize_profile(message.get("profile", {}))
+                peer.profile = incoming_profile
                 existing_peers = [public_peer(existing) for existing in room.values()]
                 existing_peer_ids = [existing["peerId"] for existing in existing_peers]
                 peer.room_code = code

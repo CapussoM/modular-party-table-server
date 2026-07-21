@@ -31,8 +31,11 @@ SYNCED_PROFILE_KEYS = {
     "coins",
     "rewarded_ads_completed",
     "rewarded_ads_since_chest",
+    "rewarded_chest_day",
+    "rewarded_chests_today",
     "unopened_chests",
     "premium_chests",
+    "promo_code_redemptions",
     "mission_state",
     "avatar_inventory",
     "avatar_equipment",
@@ -127,12 +130,28 @@ def sanitize_cloud_profile(value: Any) -> dict[str, Any]:
             result.get(key, 0),
             2_000_000_000,
         )
+    result["rewarded_chest_day"] = _bounded_string(
+        result.get("rewarded_chest_day", ""),
+        10,
+    )
+    result["rewarded_chests_today"] = _bounded_non_negative_int(
+        result.get("rewarded_chests_today", 0),
+        3,
+    )
     premium = result.get("premium_chests", {})
     if not isinstance(premium, dict):
         premium = {}
     result["premium_chests"] = {
         tier: _bounded_non_negative_int(premium.get(tier, 0), 1_000_000)
         for tier in ("rare", "epic", "legendary")
+    }
+    redemptions = result.get("promo_code_redemptions", {})
+    if not isinstance(redemptions, dict):
+        redemptions = {}
+    result["promo_code_redemptions"] = {
+        _bounded_string(code, 64): _bounded_non_negative_int(count, 1000)
+        for code, count in list(redemptions.items())[:256]
+        if _bounded_string(code, 64)
     }
     result["mission_state"] = _sanitize_mission_state(
         result.get("mission_state", {})
